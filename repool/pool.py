@@ -99,12 +99,14 @@ class ConnectionPool(object):
         :raises Empty: No resources are available before timeout.
         """
         self._pool_lock.acquire()
-        if timeout is None:
-            conn_wrapper = self._pool.get_nowait()
-        else:
-            conn_wrapper = self._pool.get(True, timeout)
-        self._current_acquired += 1
-        self._pool_lock.release()
+        try:
+            if timeout is None:
+                conn_wrapper = self._pool.get_nowait()
+            else:
+                conn_wrapper = self._pool.get(True, timeout)
+            self._current_acquired += 1
+        finally:
+            self._pool_lock.release()
         return conn_wrapper.connection
 
     def release(self, conn):
@@ -140,22 +142,24 @@ class ConnectionPool(object):
             logger.debug("Cleanup thread running...")
             now = time.time()
             queue_tmp = Queue()
+            self._pool_lock.acquire()
             try:
-                self._pool_lock.acquire()
                 nb = 0
                 while not self._pool.empty():
                     conn_wrapper = self._pool.get_nowait()
-                    if (now - conn_wrapper.connected_at) > self.conn_ttl:
-                        conn_wrapper.connection.close()
+                    expired = (now - conn_wrapper.connected_at) > self.conn_ttl
+                    if not conn_wrapper.connection.is_open() or expired:
+                        if expired:
+                            conn_wrapper.connection.close()
                         del conn_wrapper
                         queue_tmp.put(self.new_conn())
                         nb += 1
                     else:
                         queue_tmp.put(conn_wrapper)
                 self._pool = queue_tmp
-                self._pool_lock.release()
                 logger.debug(" %d connection(s) cleaned" % nb)
             except Exception as e:
                 logger.exception(e)
-                pass
+            finally:
+                self._pool_lock.release()
         logger.debug("Cleanup thread ending")
