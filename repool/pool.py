@@ -19,7 +19,7 @@ import rethinkdb as r
 from queue import Queue
 import time
 import logging
-from threading import Lock, Thread, Event
+from threading import Lock, Thread, Event, local
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +63,15 @@ class ConnectionPool(object):
         self._conn_args.pop('conn_ttl', None)
         self._conn_args.pop('cleanup', None)
 
-        self._pool = Queue()
-        self._pool_lock = Lock()
-        self._pool_lock.acquire()
+        self.local = local()
+
+        self.local._pool = Queue()
+        self.local._pool_lock = Lock()
+        self.local._pool_lock.acquire()
         for i in range(0, self.pool_size):
-            self._pool.put(self.new_conn())
+            self.local._pool.put(self.new_conn())
         self._current_acquired = 0
-        self._pool_lock.release()
+        self.local._pool_lock.release()
 
         if self.cleanup_timeout > 0:
             self._thread_event = Event()
@@ -89,7 +91,7 @@ class ConnectionPool(object):
         :return:
         """
         logger.debug("Opening new connection to rethinkdb with args=%s" % self._conn_args)
-        return ConnectionWrapper(self._pool, **self._conn_args)
+        return ConnectionWrapper(self.local._pool, **self._conn_args)
 
     def acquire(self, timeout=None):
         """Acquire a connection
@@ -98,41 +100,43 @@ class ConnectionPool(object):
         :returns: Returns a RethinkDB connection
         :raises Empty: No resources are available before timeout.
         """
-        self._pool_lock.acquire()
+        self.local._pool_lock.acquire()
         try:
             if timeout is None:
-                conn_wrapper = self._pool.get_nowait()
+                conn_wrapper = self.local._pool.get_nowait()
             else:
-                conn_wrapper = self._pool.get(True, timeout)
+                conn_wrapper = self.local._pool.get(True, timeout)
+            if conn_wrapper is None:
+                conn_wrapper = self.new_conn()
             self._current_acquired += 1
         finally:
-            self._pool_lock.release()
+            self.local._pool_lock.release()
         return conn_wrapper.connection
 
     def release(self, conn):
         """Release a previously acquired connection.
         The connection is put back into the pool."""
-        self._pool_lock.acquire()
-        self._pool.put(ConnectionWrapper(self._pool, conn))
+        self.local._pool_lock.acquire()
+        self.local._pool.put(ConnectionWrapper(self.local._pool, conn))
         self._current_acquired -= 1
-        self._pool_lock.release()
+        self.local._pool_lock.release()
 
     def empty(self):
         """Check pool emptyness
         """
-        return self._pool.empty()
+        return self.local._pool.empty()
 
     def release_pool(self):
         """Release pool and all its connection"""
         if self._current_acquired > 0:
             raise PoolException("Can't release pool: %d connection(s) still acquired" % self._current_acquired)
-        while not self._pool.empty():
+        while not self.local._pool.empty():
             conn = self.acquire()
             conn.close()
         if self._cleanup_thread is not None:
             self._thread_event.set()
             self._cleanup_thread.join()
-        self._pool = None
+        self.local._pool = None
 
     def _cleanup(self, stop_event, timeout):
         logger.debug("Starting cleanup thread")
@@ -142,11 +146,11 @@ class ConnectionPool(object):
             logger.debug("Cleanup thread running...")
             now = time.time()
             queue_tmp = Queue()
-            self._pool_lock.acquire()
+            self.local._pool_lock.acquire()
             try:
                 nb = 0
-                while not self._pool.empty():
-                    conn_wrapper = self._pool.get_nowait()
+                while not self.local._pool.empty():
+                    conn_wrapper = self.local._pool.get_nowait()
                     expired = (now - conn_wrapper.connected_at) > self.conn_ttl
                     if not conn_wrapper.connection.is_open() or expired:
                         if expired:
@@ -156,22 +160,22 @@ class ConnectionPool(object):
                         nb += 1
                     else:
                         queue_tmp.put(conn_wrapper)
-                self._pool = queue_tmp
+                self.local._pool = queue_tmp
                 logger.debug(" %d connection(s) cleaned" % nb)
             except Exception as e:
                 logger.exception(e)
             finally:
-                self._pool_lock.release()
+                self.local._pool_lock.release()
         logger.debug("Cleanup thread ending")
 
     def connect(self, timeout=None):
-        '''Acquire a new connection with `with` statement and auto release the connection after
+        """Acquire a new connection with `with` statement and auto release the connection after
             go out the with block
 
         :param timeout: @see #aquire
         :returns: Returns a RethinkDB connection
         :raises Empty: No resources are available before timeout.
-        '''
+        """
         return self.__F__(self, timeout)
 
     class __F__:
