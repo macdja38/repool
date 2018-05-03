@@ -1,1 +1,1 @@
-from .pool import ConnectionPool, ConnectionWrapper
+from .pool import ConnectionPool, ConnectionWrapper, PoolThreadWrapper
