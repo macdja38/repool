@@ -19,7 +19,7 @@ import rethinkdb as r
 from queue import Queue
 import time
 import logging
-from threading import Lock, Thread, Event
+from threading import Lock, Thread, Event, local
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,21 @@ class ConnectionWrapper(object):
     @property
     def connection(self):
         return self._conn
+
+
+class PoolThreadWrapper(object):
+    """
+    A wrapper for the connection pool to allow one pool per thread.
+    """
+
+    def __init__(self, **kwargs):
+        self._local = local()
+        self._kwargs = kwargs
+
+    def get_pool(self):
+        if "pool" not in self._local:
+            self._local.pool = ConnectionPool(**self._kwargs)
+        return self._local.pool
 
 
 class ConnectionPool(object):
