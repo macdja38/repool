@@ -52,7 +52,7 @@ class PoolThreadWrapper(object):
         self._kwargs = kwargs
 
     def get_pool(self):
-        if "pool" not in self._local:
+        if not hasattr(self._local, "pool"):
             self._local.pool = ConnectionPool(**self._kwargs)
         return self._local.pool
 
